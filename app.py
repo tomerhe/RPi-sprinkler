@@ -7,6 +7,7 @@ Run with: sudo python3 app.py
 
 import configparser
 import datetime
+import hmac
 import json
 import os
 import subprocess
@@ -14,7 +15,7 @@ import threading
 import time
 import urllib.request
 
-from flask import Flask, request
+from flask import Flask, request, Response
 
 try:
     import pigpio
@@ -161,6 +162,11 @@ def ensure_default_cfg():
         cfg.add_section('WateringMinutes')
         for i in range(1, len(STATIONS) + 1):
             cfg.set('WateringMinutes', str(i), '20')
+        changed = True
+    if not cfg.has_section('auth'):
+        cfg.add_section('auth')
+        cfg.set('auth', 'username', 'admin')
+        cfg.set('auth', 'password', 'sprinkler')
         changed = True
     if changed:
         write_cfg(cfg)
@@ -418,6 +424,26 @@ def page(title: str, body: str) -> str:
 <div class="status-bar {cls}">&#x25CF; {txt}</div>
 {body}
 </body></html>"""
+
+
+# ── Authentication ─────────────────────────────────────────────────────────────
+@app.before_request
+def require_login():
+    auth = request.authorization
+    cfg  = read_cfg()
+    try:
+        exp_u = cfg.get('auth', 'username')
+        exp_p = cfg.get('auth', 'password')
+    except configparser.Error:
+        return  # no [auth] section configured — allow through
+    if (not auth
+            or not hmac.compare_digest(auth.username, exp_u)
+            or not hmac.compare_digest(auth.password, exp_p)):
+        return Response(
+            'Please log in.',
+            401,
+            {'WWW-Authenticate': 'Basic realm="Pi Sprinkler"'},
+        )
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────

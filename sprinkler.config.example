@@ -1,0 +1,35 @@
+[forecastio]
+lat = 32.0000
+lng = 35.0000
+
+[auth]
+username = admin
+password = changeme
+
+[stations]
+1 = Front drip
+2 = Back
+3 = Perimeter hedge
+4 = Back entrance + fence
+5 = Entrance
+
+[GPIO]
+NumberOfStations = 5
+1 = 5
+2 = 6
+3 = 12
+4 = 13
+5 = 16
+Master = 25
+
+[WateringMinutes]
+1 = 10
+2 = 30
+3 = 20
+4 = 20
+5 = 20
+
+[RuntimeParams]
+gauge = 30.0
+precipitation = 5
+    # Skip watering if yesterday's rainfall (mm) reached this threshold

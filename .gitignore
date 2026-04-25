@@ -4,3 +4,4 @@ __pycache__/
 sprinkler_state.json
 .venv/
 *.log
+sprinkler.config
