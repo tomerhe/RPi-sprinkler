@@ -14,7 +14,7 @@ import threading
 import time
 import urllib.request
 
-from flask import Flask, redirect, render_template_string, request, url_for
+from flask import Flask, request
 
 try:
     import pigpio
@@ -33,7 +33,7 @@ app.secret_key = b'sprinkler-secret-key-change-me'
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "sprinkler.config")
 STATE_FILE  = os.path.join(BASE_DIR, "sprinkler_state.json")
-LOG_FILE    = "/home/httpd/log/sprinkler-auto.log"
+LOG_FILE    = os.path.join(BASE_DIR, "sprinkler.log")
 
 
 def _load_gpio_config():
@@ -213,8 +213,9 @@ def fetch_weather() -> dict:
             "conditions":       WMO_CODES.get(cw.get("weathercode", -1), "Unknown"),
             "today_high":       daily["temperature_2m_max"][1],
             "yesterday_high":   daily["temperature_2m_max"][0],
-            "today_precip":     precip_label(daily["precipitation_sum"][1]),
-            "yesterday_precip": precip_label(daily["precipitation_sum"][0]),
+            "today_precip":        precip_label(daily["precipitation_sum"][1]),
+            "yesterday_precip":    precip_label(daily["precipitation_sum"][0]),
+            "yesterday_precip_mm": daily["precipitation_sum"][0],
             "error": None,
         }
     except Exception as exc:
@@ -222,10 +223,18 @@ def fetch_weather() -> dict:
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 def log(msg: str):
-    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FILE, "a") as f:
         f.write(f"[{ts}] {msg}\n")
+    # Trim to last 1000 lines when file exceeds 512 KB
+    try:
+        if os.path.getsize(LOG_FILE) > 512 * 1024:
+            with open(LOG_FILE) as f:
+                lines = f.readlines()
+            with open(LOG_FILE, "w") as f:
+                f.writelines(lines[-1000:])
+    except OSError:
+        pass
 
 # ── Status ─────────────────────────────────────────────────────────────────────
 def get_status() -> tuple[str, str]:
@@ -262,10 +271,26 @@ def job1():
             return
         _state["running"] = True
 
-    log("<Master ON>")
-    master_on()
+    ran = False
     try:
         cfg = read_cfg()
+
+        # Rain skip: check yesterday's precipitation against threshold
+        w = fetch_weather()
+        if not w.get("error"):
+            try:
+                threshold = float(cfg.get('RuntimeParams', 'precipitation'))
+            except (configparser.Error, ValueError):
+                threshold = 0.0
+            yesterday_mm = float(w.get("yesterday_precip_mm") or 0)
+            if threshold > 0 and yesterday_mm >= threshold:
+                log(f"<Skipped \u2014 yesterday's rain {yesterday_mm:.1f}mm \u2265 threshold {threshold:.1f}mm>")
+                return
+
+        ran = True
+        log("<Master ON>")
+        master_on()
+
         minutes: dict[int, float] = {}
         if cfg.has_section("WateringMinutes"):
             for k, v in cfg.items("WateringMinutes"):
@@ -292,12 +317,15 @@ def job1():
         all_off()
         with _lock:
             _state["running"] = False
-        log("<Master OFF>")
+        if ran:
+            log("<Master OFF>")
 
 
 def test_run(duration_secs: int):
     """Cycle all stations for `duration_secs` each as a test."""
     with _lock:
+        if _state["running"]:
+            return   # already running, ignore
         _state["running"] = True
     master_on()
     try:
@@ -616,9 +644,21 @@ def settings():
     return page("Settings", body)
 
 
-@app.route("/program")
+@app.route("/program", methods=["GET", "POST"])
 def program():
     cfg   = read_cfg()
+    alert = ""
+    if request.method == "POST":
+        if cfg.has_section("WateringMinutes"):
+            for k in cfg.options("WateringMinutes"):
+                val = request.form.get(f"min_{k}", "").strip()
+                try:
+                    cfg.set("WateringMinutes", k, str(max(0.0, float(val))))
+                except ValueError:
+                    pass
+            write_cfg(cfg)
+            alert = '<div class="alert">Durations saved.</div>'
+
     names = station_names()
     rows  = ""
     if cfg.has_section("WateringMinutes"):
@@ -627,19 +667,27 @@ def program():
                 idx  = int(k) - 1
                 mins = float(v)
                 name = names.get(idx, f"Station {idx + 1}")
-                rows += f"<tr><td>{name}</td><td>{mins:.0f} min</td></tr>"
+                rows += f"""<tr>
+                  <td>{name}</td>
+                  <td><input type="number" name="min_{k}" value="{mins:.0f}" min="0" step="1" style="width:70px"> min</td>
+                </tr>"""
             except ValueError:
                 pass
 
     body = f"""
+    {alert}
     <h2>Program</h2>
-    <p>The sprinkler runs <strong>every day at 03:00</strong> in this station order:</p>
-    <table>
-      <thead><tr><th>Station</th><th>Duration</th></tr></thead>
-      <tbody>{rows}</tbody>
-    </table>
-    <p>To change durations, edit the <code>[WateringMinutes]</code> section in
-       <a href="/settings">Settings</a>.</p>"""
+    <p>The sprinkler runs <strong>every day at 03:00</strong>.
+       Set duration to 0 to skip a station.</p>
+    <form method="post">
+      <table>
+        <thead><tr><th>Station</th><th>Duration</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+      <p style="margin-top:1rem">
+        <button class="btn btn-green" type="submit">Save</button>
+      </p>
+    </form>"""
     return page("Program", body)
 
 
@@ -669,25 +717,6 @@ def show_log():
     lines = "\n".join(entries)
     body = f"<h2>Log</h2>{lines or '<p>Log is empty.</p>'}"
     return page("Log", body)
-
-
-@app.route("/debug")
-def debug():
-    rows = ""
-    rows += f"<tr><td>GPIO_AVAILABLE</td><td>{GPIO_AVAILABLE}</td></tr>"
-    rows += f"<tr><td>MASTER_PIN</td><td>{MASTER_PIN}</td></tr>"
-    rows += f"<tr><td>STATIONS</td><td>{STATIONS}</td></tr>"
-    if GPIO_AVAILABLE:
-        for i, pin in enumerate(STATIONS):
-            val  = _pi.read(pin)
-            mode = _pi.get_mode(pin)
-            rows += f"<tr><td>Station {i+1} (GPIO {pin})</td><td>mode={mode} raw={val} on={gpio_read(pin)}</td></tr>"
-        if MASTER_PIN is not None:
-            val  = _pi.read(MASTER_PIN)
-            mode = _pi.get_mode(MASTER_PIN)
-            rows += f"<tr><td>MASTER (GPIO {MASTER_PIN})</td><td>mode={mode} raw={val} on={gpio_read(MASTER_PIN)}</td></tr>"
-    body = f"<h2>GPIO Debug</h2><table>{rows}</table>"
-    return page("Debug", body)
 
 
 @app.route("/reboot", methods=["GET", "POST"])
