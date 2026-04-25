@@ -1,11 +1,11 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import pigpio
 from datetime import datetime
 import time
 import os
 from apscheduler.schedulers.background import BackgroundScheduler
-import SocketServer
+import socketserver
 import threading
 
 ### TBD
@@ -23,18 +23,18 @@ pi = pigpio.pi()
 futuretime = time.time()
 
 # Create some custom threading classes here
-class ThreadedServer(SocketServer.BaseRequestHandler):
+class ThreadedServer(socketserver.BaseRequestHandler):
     def handle(self):
         global running
         global enabled
         global delay
         global futuretime
         data = "dummy"
-        print "Client connected with ", self.client_address
+        print("Client connected with ", self.client_address)
         while len(data):
-            data = self.request.recv(1024)
+            data = self.request.recv(1024).decode('utf-8')
             if data:
-                print "received " + data + " from client"
+                print("received " + data + " from client")
                 # Set the response based on the data
                 (command,var) = data.split(":")
                 if "test_run" in command:
@@ -45,11 +45,11 @@ class ThreadedServer(SocketServer.BaseRequestHandler):
                 elif "status" in data:
                     if enabled == False:
                         # send the message to the client
-                        self.request.send("disabled:%s" % str(futuretime))
+                        self.request.send(("disabled:%s" % str(futuretime)).encode('utf-8'))
                     elif running:
-                        self.request.send("running")
+                        self.request.send(b"running")
                     else:
-                        self.request.send("stopped")
+                        self.request.send(b"stopped")
                 elif "pause" in data:
                     scheduler.pause()  # What about delay then pause?
                     enabled = False
@@ -65,16 +65,16 @@ class ThreadedServer(SocketServer.BaseRequestHandler):
                     enabled = False
                     delay = True
                 else:
-                    self.request.send("error")
+                    self.request.send(b"error")
 
-        print "Client exited"
+        print("Client exited")
         self.request.close()
 
         if "test_run" in command:
             if not var == "cancel":
                 temp(var)
                 #test_run(var)
-class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     pass
 
 class ThreadingTimer(object):
@@ -110,29 +110,31 @@ def temp(t):
     global running
     x = 1
     while running:
-        print "Station %s ON" % x
+        print("Station %s ON" % x)
         time.sleep(int(t))
-        print "Station %s OFF" % x
+        print("Station %s OFF" % x)
         time.sleep(1)
         x+=1
         if x > len(station):
             running = False
     all_off()
-    print "JOB ENDED"
+    print("JOB ENDED")
 
 def test_run(t):
+    global running
     running = True
     for i in station:
-        pi.write(station[i], 0)
+        pi.write(i, 0)
         time.sleep(t)
-        pi.write(station[i], 1)
+        pi.write(i, 1)
         time.sleep(1)
     for i in station:
-        pi.write(station[i], 1)
+        pi.write(i, 1)
     running = False
 
 # For now, this function is your main program. This will be implemented in program.py later.
 def job1():
+    global running
     print("Job 1 running!")
     running = True
     pi.write(station[0], 0)
@@ -173,7 +175,7 @@ def job1():
     running = False
 
 if __name__ == '__main__':
-    # Maker sure that all stations are turned off initially
+    # Make sure that all stations are turned off initially
     all_off()
 
     scheduler = BackgroundScheduler()
@@ -182,10 +184,12 @@ if __name__ == '__main__':
     scheduler.start()
     print('Press Ctrl+{0} to exit'.format('Break' if os.name == 'nt' else 'C'))
 
-    server = ThreadedTCPServer(('',5555), ThreadedServer)
-    server.serve_forever()
     timer = ThreadedTimer()
-
-all_off()
-client.close()
-scheduler.shutdown(wait=False)
+    server = ThreadedTCPServer(('',5555), ThreadedServer)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        all_off()
+        scheduler.shutdown(wait=False)

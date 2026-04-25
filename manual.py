@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import pigpio
 import cgi
@@ -15,22 +15,22 @@ if form.getfirst("test") == "Start":
     if duration:
         clientsocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         clientsocket.connect(('localhost', 5555))
-        clientsocket.send("test_run:%s" % duration)
+        clientsocket.send(("test_run:%s" % duration).encode('utf-8'))
         clientsocket.close()
     else:
         error = True
 elif form.getfirst("test") == "Cancel":
     clientsocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     clientsocket.connect(('localhost', 5555))
-    clientsocket.send("test_run:cancel")
+    clientsocket.send(b"test_run:cancel")
     clientsocket.close()
 
 time.sleep(1)
 clientsocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 clientsocket.connect(('localhost', 5555))
-clientsocket.send("status:0")
+clientsocket.send(b"status:0")
 while True:
-    data = clientsocket.recv(64)
+    data = clientsocket.recv(64).decode('utf-8')
     if data == "running":
         running = True
         break
@@ -61,8 +61,8 @@ for i in station:
     else:
         status[i] = ""
 
-print "Content-type: text/html\n\n"
-print """
+print("Content-type: text/html\n\n")
+print("""
 <html>
 <head>
 <title>Pi Sprinkler - Manual Control</title>
@@ -83,23 +83,23 @@ table, th, td {
 <p>Current status: %s</p>
 <h3>Manual Station Control</h3>
 <form action="/cgi-bin/manual.py" method="get">
-""" % data
+""" % data)
 
-for x in xrange(0, len(station)):
-    print """<p style="color:%s;font-weight: bold">Station %s: <input type="submit" name="%s" value="ON"><input type="submit" name="%s" value="OFF"></p>""" % (status[station[x]],x+1,station[x],station[x])
+for x in range(0, len(station)):
+    print("""<p style="color:%s;font-weight: bold">Station %s: <input type="submit" name="%s" value="ON"><input type="submit" name="%s" value="OFF"></p>""" % (status[station[x]],x+1,station[x],station[x]))
 
 #print form.getfirst("5","bonk")
 #cgi.print_form(form)
 
-print """<h3>Test Run</h3>"""
+print("""<h3>Test Run</h3>""")
 if running:
-    print """<p style="color:green;font-weight: bold">Duration (seconds): RUNNING <input type="submit" name="test" value="Cancel"></p>"""
+    print("""<p style="color:green;font-weight: bold">Duration (seconds): RUNNING <input type="submit" name="test" value="Cancel"></p>""")
 else:
-    print """<p>Duration (seconds):<input type="text" name="duration" value="10" size="4"><input type="submit" name="test" value="Start"><input type="submit" name="test" value="Cancel"></p>"""
+    print("""<p>Duration (seconds):<input type="text" name="duration" value="10" size="4"><input type="submit" name="test" value="Start"><input type="submit" name="test" value="Cancel"></p>""")
     if error:
-        print """<p style="color:red;font-weight: bold">Duration must not be blank!<p>"""
+        print("""<p style="color:red;font-weight: bold">Duration must not be blank!<p>""")
 
-print """
+print("""
 </form>
 <h3>System Control</h3>
 <form action="/cgi-bin/reboot.py" method="get">
@@ -107,4 +107,4 @@ print """
 </form>
 </body>
 </html>
-"""
+""")

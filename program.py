@@ -1,10 +1,10 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import cgi
 import cgitb; cgitb.enable()  # for troubleshooting
 
-print "Content-type: text/html\n\n"
-print """
+print("Content-type: text/html\n\n")
+print("""
 <html>
 <head>
 <title>Pi Sprinkler - Program Editor</title>
@@ -26,4 +26,4 @@ table, th, td {
 This page is under construction. In the meantime, edit your program directly in scheduler.py.
 </body>
 </html>
-"""
+""")
