@@ -8,6 +8,7 @@ Run with: sudo python3 app.py
 import configparser
 import datetime
 import hmac
+import ipaddress
 import json
 import os
 import subprocess
@@ -427,8 +428,22 @@ def page(title: str, body: str) -> str:
 
 
 # ── Authentication ─────────────────────────────────────────────────────────────
+_LAN_NETS = [
+    ipaddress.ip_network('10.0.0.0/8'),
+    ipaddress.ip_network('172.16.0.0/12'),
+    ipaddress.ip_network('192.168.0.0/16'),
+]
+
 @app.before_request
 def require_login():
+    # Skip auth for direct LAN connections
+    try:
+        remote = ipaddress.ip_address(request.remote_addr)
+        if any(remote in net for net in _LAN_NETS):
+            return
+    except ValueError:
+        pass
+
     auth = request.authorization
     cfg  = read_cfg()
     try:
