@@ -9,7 +9,7 @@ import time
 HOST = "192.168.68.116"
 USER = "pi"
 PASS = "t0mer!ko"
-REMOTE_DIR = "/var/www/html/cgi-bin"
+REMOTE_DIR = "/opt/sprinkler"
 LOCAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 FILES = [
@@ -35,6 +35,10 @@ def run_plain(cmd, timeout=30):
     stdout.channel.recv_exit_status()
     return stdout.read().decode().strip()
 
+# Create app directory, make it writable by pi for SFTP upload
+run(f"mkdir -p {REMOTE_DIR}")
+run(f"chown pi:pi {REMOTE_DIR}")
+
 # Install Flask + pigpio only if not already installed
 print("Checking/installing Flask and pigpio...")
 _, chk, _ = ssh.exec_command("python3 -c 'import flask, pigpio' 2>&1")
@@ -44,9 +48,6 @@ if chk.read().decode().strip():
     print("  installed")
 else:
     print("  already installed, skipping")
-
-# Fix ownership
-run(f"sudo chown -R pi:pi {REMOTE_DIR}")
 
 # Upload files (CRLF -> LF)
 sftp = ssh.open_sftp()

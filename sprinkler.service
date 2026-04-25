@@ -4,8 +4,8 @@ After=network.target pigpiod.service
 Requires=pigpiod.service
 
 [Service]
-ExecStart=/usr/bin/python3 /var/www/html/cgi-bin/app.py
-WorkingDirectory=/var/www/html/cgi-bin
+ExecStart=/usr/bin/python3 /opt/sprinkler/app.py
+WorkingDirectory=/opt/sprinkler
 Restart=always
 RestartSec=5
 User=root

@@ -32,6 +32,7 @@ app.secret_key = b'sprinkler-secret-key-change-me'
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "sprinkler.config")
+STATE_FILE  = os.path.join(BASE_DIR, "sprinkler_state.json")
 LOG_FILE    = "/home/httpd/log/sprinkler-auto.log"
 
 
@@ -66,11 +67,40 @@ STATIONS, MASTER_PIN = _load_gpio_config()
 # ── Global state ───────────────────────────────────────────────────────────────
 _lock  = threading.Lock()
 _state = {
-    "running":   False,
+    "running":   False,   # never persisted — always False on startup
     "enabled":   True,
     "delay":     False,
-    "resume_at": 0.0,   # epoch time when delay expires
+    "resume_at": 0.0,     # epoch time when delay expires
 }
+
+def _load_state():
+    """Load persisted enabled/delay/resume_at from JSON file."""
+    try:
+        with open(STATE_FILE) as f:
+            saved = json.load(f)
+        with _lock:
+            _state["enabled"]   = bool(saved.get("enabled", True))
+            _state["delay"]     = bool(saved.get("delay", False))
+            _state["resume_at"] = float(saved.get("resume_at", 0.0))
+        # If delay has already expired, clear it
+        with _lock:
+            if _state["delay"] and time.time() >= _state["resume_at"]:
+                _state["delay"]     = False
+                _state["enabled"]   = True
+                _state["resume_at"] = 0.0
+    except (FileNotFoundError, ValueError, KeyError):
+        pass   # first run or corrupt file — use defaults
+
+def _save_state():
+    """Persist enabled/delay/resume_at to JSON file."""
+    with _lock:
+        snapshot = {
+            "enabled":   _state["enabled"],
+            "delay":     _state["delay"],
+            "resume_at": _state["resume_at"],
+        }
+    with open(STATE_FILE, "w") as f:
+        json.dump(snapshot, f)
 
 # ── GPIO ───────────────────────────────────────────────────────────────────────
 def gpio_setup():
@@ -84,12 +114,9 @@ def gpio_setup():
         _pi.write(MASTER_PIN, 0)  # master NC wiring: LOW = energized = NC open = valve CLOSED (safe default)
 
 def gpio_write(pin, on: bool):
-    label = "MASTER" if pin == MASTER_PIN else f"GPIO{pin}"
     if GPIO_AVAILABLE:
         _pi.write(pin, 0 if on else 1)
-        log(f"[GPIO] {label} pin={pin} -> {'ON' if on else 'OFF'} (wrote {'0' if on else '1'})")
-    else:
-        log(f"[GPIO] SKIPPED (GPIO_AVAILABLE=False) {label} pin={pin} -> {'ON' if on else 'OFF'}")
+    
 
 def gpio_read(pin) -> bool:
     return GPIO_AVAILABLE and (_pi.read(pin) == 0)
@@ -214,6 +241,19 @@ def get_status() -> tuple[str, str]:
         return "running", "Running"
     return "idle", "Idle"
 
+def station_names() -> dict[int, str]:
+    """Return {0-based-index: name} from [stations] config section."""
+    cfg = read_cfg()
+    names = {}
+    if cfg.has_section('stations'):
+        for k, v in cfg.items('stations'):
+            try:
+                names[int(k) - 1] = v.strip()
+            except ValueError:
+                pass
+    return names
+
+
 # ── Scheduler jobs ─────────────────────────────────────────────────────────────
 def job1():
     """Main watering job driven by [WateringMinutes] in config."""
@@ -233,6 +273,7 @@ def job1():
                     minutes[int(k) - 1] = float(v)
                 except ValueError:
                     pass
+        names = station_names()
 
         for i, pin in enumerate(STATIONS):
             with _lock:
@@ -240,11 +281,12 @@ def job1():
                     break
             dur = minutes.get(i, 0)
             if dur > 0:
+                name = names.get(i, f"Station {i + 1}")
                 gpio_write(pin, True)
-                log(f"<Station {i + 1} ON>")
+                log(f"<{name} ON>")
                 time.sleep(dur * 60)
                 gpio_write(pin, False)
-                log(f"<Station {i + 1} OFF>")
+                log(f"<{name} OFF>")
                 time.sleep(1)
     finally:
         all_off()
@@ -259,15 +301,17 @@ def test_run(duration_secs: int):
         _state["running"] = True
     master_on()
     try:
+        names = station_names()
         for i, pin in enumerate(STATIONS):
             with _lock:
                 if not _state["running"]:
                     break
+            name = names.get(i, f"Station {i + 1}")
             gpio_write(pin, True)
-            log(f"<Test Station {i + 1} ON>")
+            log(f"<Test {name} ON>")
             time.sleep(duration_secs)
             gpio_write(pin, False)
-            log(f"<Test Station {i + 1} OFF>")
+            log(f"<Test {name} OFF>")
             time.sleep(1)
     finally:
         all_off()
@@ -279,10 +323,13 @@ def _delay_watcher():
     """Background thread that auto-resumes the scheduler after a timed delay."""
     while True:
         with _lock:
-            if _state["delay"] and time.time() >= _state["resume_at"]:
-                scheduler.resume()
+            expired = _state["delay"] and time.time() >= _state["resume_at"]
+        if expired:
+            scheduler.resume()
+            with _lock:
                 _state["enabled"] = True
                 _state["delay"]   = False
+            _save_state()
         time.sleep(30)
 
 
@@ -382,11 +429,14 @@ def manual():
             idx = int(request.form.get("station", 0))
             pin = STATIONS[idx]
             turning_on = not gpio_read(pin)
+            names = station_names()
+            name  = names.get(idx, f"Station {idx + 1}")
             if turning_on:
                 master_on()
             gpio_write(pin, turning_on)
             if not turning_on and not any_station_on():
                 master_off()
+            log(f"<Manual: {name} {'ON' if turning_on else 'OFF'}>")
         elif action == "test_start":
             dur = request.form.get("duration", "")
             if not dur.isdigit() or int(dur) < 1:
@@ -399,19 +449,13 @@ def manual():
                 _state["running"] = False
             all_off()
 
-    cfg          = read_cfg()
-    station_names = {}
-    if cfg.has_section("stations"):
-        for k, v in cfg.items("stations"):
-            try:
-                station_names[int(k) - 1] = v
-            except ValueError:
-                pass
+    cfg        = read_cfg()
+    stn_names  = station_names()
 
     rows = ""
     for i, pin in enumerate(STATIONS):
         on   = gpio_read(pin)
-        name = station_names.get(i, f"Station {i + 1}")
+        name = stn_names.get(i, f"Station {i + 1}")
         rows += f"""
         <tr class="{'on' if on else ''}">
           <td>{i + 1}</td>
@@ -477,6 +521,7 @@ def delay():
                     _state["delay"]     = True
                     _state["resume_at"] = resume_at
                 scheduler.pause()
+                _save_state()
                 exp = datetime.datetime.fromtimestamp(resume_at).strftime("%d/%m/%Y %H:%M")
                 alert = f'<div class="alert">Rain delay set &mdash; scheduler will resume at {exp}.</div>'
             except ValueError:
@@ -486,12 +531,14 @@ def delay():
                 _state["enabled"] = False
                 _state["delay"]   = False
             scheduler.pause()
+            _save_state()
             alert = '<div class="alert">Scheduler paused indefinitely.</div>'
         elif action == "resume":
             with _lock:
                 _state["enabled"] = True
                 _state["delay"]   = False
             scheduler.resume()
+            _save_state()
             alert = '<div class="alert">Scheduler resumed.</div>'
 
     body = f"""
@@ -571,35 +618,55 @@ def settings():
 
 @app.route("/program")
 def program():
-    body = """
-    <h2>Program Editor</h2>
-    <p>This page is under construction.</p>
-    <p>Edit the watering duration for each station in
-       <a href="/settings">Settings</a> under the
-       <code>[WateringMinutes]</code> section.<br>
-       The scheduler runs <strong>Monday, Wednesday, Friday and Sunday at 06:30</strong>.
-    </p>"""
+    cfg   = read_cfg()
+    names = station_names()
+    rows  = ""
+    if cfg.has_section("WateringMinutes"):
+        for k, v in cfg.items("WateringMinutes"):
+            try:
+                idx  = int(k) - 1
+                mins = float(v)
+                name = names.get(idx, f"Station {idx + 1}")
+                rows += f"<tr><td>{name}</td><td>{mins:.0f} min</td></tr>"
+            except ValueError:
+                pass
+
+    body = f"""
+    <h2>Program</h2>
+    <p>The sprinkler runs <strong>every day at 03:00</strong> in this station order:</p>
+    <table>
+      <thead><tr><th>Station</th><th>Duration</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    <p>To change durations, edit the <code>[WateringMinutes]</code> section in
+       <a href="/settings">Settings</a>.</p>"""
     return page("Program", body)
 
 
 @app.route("/log")
 def show_log():
-    lines = ""
+    entries = []
     try:
         with open(LOG_FILE) as f:
             for raw in f:
                 line    = raw.strip()
+                if not line:
+                    continue
                 escaped = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 if "Master" in line:
                     color = "#2a6496"
-                elif "Station" in line or "Test" in line:
+                elif "Test" in line:
+                    color = "#8a6d3b"
+                elif "ON" in line or "OFF" in line:
                     color = "#3c763d"
                 else:
                     color = "#555"
-                lines += f'<p style="color:{color};margin:.15rem 0;font-family:monospace;font-size:.9rem">{escaped}</p>\n'
+                entries.append(f'<p style="color:{color};margin:.15rem 0;font-family:monospace;font-size:.9rem">{escaped}</p>')
     except FileNotFoundError:
-        lines = "<p>No log file yet.</p>"
+        pass
 
+    entries.reverse()   # newest first
+    lines = "\n".join(entries)
     body = f"<h2>Log</h2>{lines or '<p>Log is empty.</p>'}"
     return page("Log", body)
 
@@ -658,9 +725,17 @@ if __name__ == "__main__":
     ensure_default_cfg()
     gpio_setup()
 
+    # Restore persisted state (delay/pause) from previous run
+    _load_state()
+
     # Schedule the main watering job
-    scheduler.add_job(job1, 'cron', day_of_week='mon,wed,fri,sun', hour=6, minute=30)
+    scheduler.add_job(job1, 'cron', hour=3, minute=0)
     scheduler.start()
+
+    # If scheduler was paused before restart, re-apply that
+    with _lock:
+        if not _state["enabled"]:
+            scheduler.pause()
 
     # Start the delay-watcher background thread
     threading.Thread(target=_delay_watcher, daemon=True).start()
