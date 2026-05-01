@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 Deploy script: backs up existing files on the Pi, then uploads the new ones.
+Before uploading, syncs user-editable config sections from the remote so that
+any changes made via the web UI are not overwritten.
 """
+import configparser
+import io
 import paramiko
 import os
 import time
@@ -20,6 +24,46 @@ FILES = [
 ssh = paramiko.SSHClient()
 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 ssh.connect(HOST, username=USER, password=PASS, timeout=15)
+
+# ── Sync user-editable config sections from remote before deploying ────────────
+# These sections are modified via the web UI; we never want to overwrite them.
+_USER_SECTIONS = {
+    'forecastio', 'stations',
+    'wateringminutes', 'norainskip', 'wateringinterval', 'runtimeparams',
+}
+
+local_cfg_path = os.path.join(LOCAL_DIR, "sprinkler.config")
+print("Syncing config from remote...")
+try:
+    sftp_pre = ssh.open_sftp()
+    remote_buf = io.BytesIO()
+    sftp_pre.getfo(f"{REMOTE_DIR}/sprinkler.config", remote_buf)
+    sftp_pre.close()
+
+    remote_cfg = configparser.ConfigParser()
+    remote_cfg.read_string(remote_buf.getvalue().decode('utf-8'))
+
+    local_cfg = configparser.ConfigParser()
+    local_cfg.read(local_cfg_path, encoding='utf-8')
+
+    changed = False
+    for section in remote_cfg.sections():
+        if section.lower() in _USER_SECTIONS:
+            if not local_cfg.has_section(section):
+                local_cfg.add_section(section)
+            for key, val in remote_cfg.items(section):
+                if local_cfg.get(section, key, fallback=None) != val:
+                    local_cfg.set(section, key, val)
+                    changed = True
+
+    if changed:
+        with open(local_cfg_path, 'w', encoding='utf-8') as f:
+            local_cfg.write(f)
+        print("  Local config updated with remote changes.")
+    else:
+        print("  Local config already up to date.")
+except Exception as e:
+    print(f"  WARNING: could not sync remote config ({e}). Proceeding with local config.")
 
 def run(cmd, timeout=30):
     """Run a command with sudo via password-on-stdin (no PTY required)."""
